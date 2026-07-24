@@ -33,6 +33,17 @@ function titleCase(s) {
   return s.replace(/\w\S*/g, t => t.charAt(0).toUpperCase() + t.slice(1));
 }
 
+// fetch with a hard timeout so nothing can hang the function
+async function fetchT(url, ms, opts) {
+  const c = new AbortController();
+  const id = setTimeout(() => c.abort(), ms || 5000);
+  try {
+    return await fetch(url, Object.assign({ signal: c.signal }, opts || {}));
+  } finally {
+    clearTimeout(id);
+  }
+}
+
 // Free Google autocomplete suggestions
 async function autocomplete(seed, gl) {
   try {
@@ -41,7 +52,7 @@ async function autocomplete(seed, gl) {
     su.searchParams.set("hl", "en");
     su.searchParams.set("gl", gl);
     su.searchParams.set("q", seed);
-    const r = await fetch(su.toString(), { headers: { "user-agent": "Mozilla/5.0" } });
+    const r = await fetchT(su.toString(), 3500, { headers: { "user-agent": "Mozilla/5.0" } });
     const t = await r.text();
     let a = null; try { a = JSON.parse(t); } catch (_) {}
     return (a && Array.isArray(a[1])) ? a[1].map(String) : [];
@@ -57,7 +68,7 @@ async function paa(query, geo, key) {
     u.searchParams.set("gl", geo.toLowerCase());
     u.searchParams.set("hl", "en");
     u.searchParams.set("api_key", key);
-    const r = await fetch(u.toString());
+    const r = await fetchT(u.toString(), 6000);
     const j = await r.json();
     return (j.related_questions || []).map(x => x.question).filter(Boolean);
   } catch (_) { return []; }
@@ -78,9 +89,12 @@ async function suggestCompetitors(brand, gl) {
     else if (low.includes(" like ")) tail = low.split(" like ").pop();
     if (!tail) return;
     tail = tail.replace(/[?]/g, "").replace(/\b(review|reviews|price|reddit|20\d\d|south africa|which is better)\b/g, "").trim();
-    if (!tail || tail === bl || tail.length < 2) return;
+    if (!tail || tail.length < 2) return;
     const name = tail.split(/\s+/).slice(0, 3).join(" ").trim();
-    if (!name || name === bl) return;
+    if (!name) return;
+    const nl = name.toLowerCase();
+    // drop brand-name variants (e.g. Environ -> "environment", "environ xt")
+    if (nl === bl || nl.includes(bl) || bl.includes(nl.split(" ")[0])) return;
     counts[name] = (counts[name] || 0) + 1;
   });
   const ranked = Object.keys(counts).filter(n => n.length >= 2).sort((a, b) => counts[b] - counts[a]);
@@ -103,10 +117,17 @@ async function buildQuestions(brand, category, geo, key) {
   const out = [];
   const qwords = ["how", "why", "is", "are", "can", "does", "do", "what", "which", "should", "when", "will", "where"];
 
-  // 1) People Also Ask — real, complete questions (2 SerpApi lookups)
   const paaSeeds = [seedBase, `best ${seedBase}`];
-  const paaRes = await Promise.all(paaSeeds.map(s => paa(s, geo, key)));
-  paaRes.flat().forEach(q => {
+  const acSeeds = [`${brand} vs`, `why is my`, `does ${seedBase}`, `how to use ${seedBase}`, `best ${seedBase} for`, `is ${seedBase} good`];
+
+  // Run PAA (SerpApi) and autocomplete (free) all in parallel
+  const [paaArrs, acArrs] = await Promise.all([
+    Promise.all(paaSeeds.map(s => paa(s, geo, key))),
+    Promise.all(acSeeds.map(s => autocomplete(s, gl)))
+  ]);
+
+  // 1) People Also Ask — real, complete questions
+  paaArrs.flat().forEach(q => {
     let t = ("" + q).trim();
     const low = t.toLowerCase();
     if (!t || seen.has(low) || t.length > 110) return;
@@ -114,10 +135,8 @@ async function buildQuestions(brand, category, geo, key) {
     out.push({ q: t, platform: "Google" });
   });
 
-  // 2) Autocomplete supplements (free) — comparison + intent seeds, strict filter
-  const acSeeds = [`${brand} vs`, `why is my`, `does ${seedBase}`, `how to use ${seedBase}`, `best ${seedBase} for`, `can i use`, `${brand} vs the`, `is ${seedBase} good`];
-  const acRes = await Promise.all(acSeeds.map(s => autocomplete(s, gl)));
-  acRes.flat().forEach(s => {
+  // 2) Autocomplete supplements — comparison + intent, strict filter
+  acArrs.flat().forEach(s => {
     let t = ("" + s).trim();
     const low = t.toLowerCase();
     const words = low.split(/\s+/);
@@ -130,6 +149,45 @@ async function buildQuestions(brand, category, geo, key) {
   });
 
   return out;
+}
+
+// Google Trends (Share of Search) via SerpApi
+async function runTrends(terms, brand, geo, key) {
+  try {
+    const u = new URL("https://serpapi.com/search.json");
+    u.searchParams.set("engine", "google_trends");
+    u.searchParams.set("q", terms.join(","));
+    u.searchParams.set("geo", geo);
+    u.searchParams.set("date", "today 12-m");
+    u.searchParams.set("data_type", "TIMESERIES");
+    u.searchParams.set("api_key", key);
+    const r = await fetchT(u.toString(), 8000);
+    const j = await r.json();
+    if (j.error) throw new Error(j.error);
+    const timeline = (j.interest_over_time && j.interest_over_time.timeline_data) || [];
+    const sums = terms.map(() => 0), counts = terms.map(() => 0);
+    timeline.forEach(pt => {
+      (pt.values || []).forEach((v, i) => {
+        const val = typeof v.extracted_value === "number" ? v.extracted_value : (parseFloat(v.value) || 0);
+        sums[i] += val; counts[i] += 1;
+      });
+    });
+    const avgs = terms.map((t, i) => counts[i] ? sums[i] / counts[i] : 0);
+    const total = avgs.reduce((a, b) => a + b, 0) || 1;
+    const board = terms.map((t, i) => ({
+      name: t,
+      avg: Math.round(avgs[i] * 10) / 10,
+      share: Math.round((avgs[i] / total) * 100),
+      you: t.toLowerCase() === brand.toLowerCase()
+    }));
+    const sorted = board.sort((a, b) => b.avg - a.avg);
+    const you = sorted.find(x => x.you) || sorted[sorted.length - 1];
+    const leader = sorted[0];
+    const gapX = (you && you.avg > 0) ? Math.round((leader.avg / you.avg) * 10) / 10 : null;
+    return { sorted, you, leader, gapX };
+  } catch (e) {
+    return { error: "Google Trends fetch failed: " + e.message };
+  }
 }
 
 exports.handler = async (event) => {
@@ -152,49 +210,20 @@ exports.handler = async (event) => {
 
   const terms = [brand, ...competitors];
 
-  // ---- Google Trends (Share of Search) via SerpApi ----
-  let sorted, you, leader, gapX;
-  try {
-    const u = new URL("https://serpapi.com/search.json");
-    u.searchParams.set("engine", "google_trends");
-    u.searchParams.set("q", terms.join(","));
-    u.searchParams.set("geo", geo);
-    u.searchParams.set("date", "today 12-m");
-    u.searchParams.set("data_type", "TIMESERIES");
-    u.searchParams.set("api_key", key);
-    const r = await fetch(u.toString());
-    const j = await r.json();
-    if (j.error) throw new Error(j.error);
-    const timeline = (j.interest_over_time && j.interest_over_time.timeline_data) || [];
-    const sums = terms.map(() => 0), counts = terms.map(() => 0);
-    timeline.forEach(pt => {
-      (pt.values || []).forEach((v, i) => {
-        const val = typeof v.extracted_value === "number" ? v.extracted_value : (parseFloat(v.value) || 0);
-        sums[i] += val; counts[i] += 1;
-      });
-    });
-    const avgs = terms.map((t, i) => counts[i] ? sums[i] / counts[i] : 0);
-    const total = avgs.reduce((a, b) => a + b, 0) || 1;
-    const board = terms.map((t, i) => ({
-      name: t,
-      avg: Math.round(avgs[i] * 10) / 10,
-      share: Math.round((avgs[i] / total) * 100),
-      you: t.toLowerCase() === brand.toLowerCase()
-    }));
-    sorted = board.sort((a, b) => b.avg - a.avg);
-    you = sorted.find(x => x.you) || sorted[sorted.length - 1];
-    leader = sorted[0];
-    gapX = (you && you.avg > 0) ? Math.round((leader.avg / you.avg) * 10) / 10 : null;
-  } catch (e) {
-    return { statusCode: 502, headers: JSON_HEADERS, body: JSON.stringify({ error: "Google Trends fetch failed: " + e.message }) };
-  }
+  // Run Trends and the question bank IN PARALLEL (keeps us well under the timeout)
+  const [trends, questions] = await Promise.all([
+    runTrends(terms, brand, geo, key),
+    buildQuestions(brand, category, geo, key)
+  ]);
 
-  const questions = await buildQuestions(brand, category, geo, key);
+  if (trends.error) {
+    return { statusCode: 502, headers: JSON_HEADERS, body: JSON.stringify({ error: trends.error }) };
+  }
 
   return {
     statusCode: 200, headers: JSON_HEADERS, body: JSON.stringify({
       brand, geo, category, timeframe: "today 12-m",
-      leaderboard: sorted, you, leader, gapX,
+      leaderboard: trends.sorted, you: trends.you, leader: trends.leader, gapX: trends.gapX,
       questions: questions.slice(0, 8),
       questionCount: questions.length,
       source: "Google Trends (relative) via SerpApi + People Also Ask + autocomplete"
