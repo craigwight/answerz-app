@@ -286,7 +286,7 @@
     <div class="cfcard">
       <div class="ctag">● Step 1 · Confirm your set</div>
       <h2>Let's map <span id="cBrand">Environ</span>'s Share of Search.</h2>
-      <p class="cfsub">Add your category and your closest rivals — we measure your live search demand against theirs. Then hit run.</p>
+      <p class="cfsub">We've suggested your closest rivals — swap any that are off, or add more. Pop in your category for sharper questions, then run.</p>
 
       <label class="cflabel">Category</label>
       <input class="cfinput" id="cCategory" placeholder="e.g. Skincare">
@@ -399,7 +399,7 @@
 
   function focusInput(){ document.getElementById('brandInput').focus(); }
 
-  // Brand entered -> show the pre-filled confirm step
+  // Brand entered -> show the confirm step + auto-suggest rivals
   function runCheck(which){
     var v=(which===2?document.getElementById('brandInput2').value:document.getElementById('brandInput').value).trim();
     if(!v) v='your brand';
@@ -407,6 +407,22 @@
     document.getElementById('landing').style.display='none';
     document.getElementById('confirm').style.display='block';
     window.scrollTo(0,0);
+    fetchSuggestions(v);
+  }
+
+  function addChipValue(v){
+    var s=document.createElement('span'); s.className='chip-c';
+    s.innerHTML=esc(v)+' <b onclick="rmChip(this)">×</b>';
+    document.getElementById('cChips').appendChild(s);
+  }
+  function fetchSuggestions(brand){
+    var market=(document.getElementById('cMarket').value||'South Africa').trim();
+    var chips=document.getElementById('cChips');
+    chips.innerHTML='<span style="font-size:13px;color:var(--mut2)">Finding your rivals…</span>';
+    fetch('/api/sos?mode=suggest&brand='+encodeURIComponent(brand)+'&market='+encodeURIComponent(market))
+      .then(function(r){return r.json();})
+      .then(function(d){ chips.innerHTML=''; (d.competitors||[]).forEach(addChipValue); })
+      .catch(function(){ chips.innerHTML=''; });
   }
 
   // competitor chips
