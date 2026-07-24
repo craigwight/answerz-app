@@ -23,34 +23,26 @@ const JSON_HEADERS = {
   "cache-control": "no-store"
 };
 
-// ---- Result cache: durable via Netlify Blobs, in-memory fallback ----
+// ---- Result cache: in-memory (per warm function instance) ----
 // Repeat brand checks (same brand+market+rivals) inside the TTL cost 0 SerpApi credits.
-let getStore = null;
-try { ({ getStore } = require("@netlify/blobs")); } catch (_) { getStore = null; }
+// No external dependency — survives across invocations while the instance stays warm.
 const MEM = new Map();                      // key -> { exp, data }
 const TTL_MS = 24 * 60 * 60 * 1000;         // 24h
+const MEM_MAX = 200;                        // cap entries so memory can't grow unbounded
 
 function cacheKey(o) {
   return [o.brand, o.geo, o.category || "", (o.competitors || []).join("|")]
     .join("::").toLowerCase().replace(/\s+/g, " ").trim();
 }
-async function cacheGet(key) {
+function cacheGet(key) {
   const m = MEM.get(key);
   if (m && m.exp > Date.now()) return m.data;
-  if (getStore) {
-    try {
-      const rec = await getStore("answerz-sos").get(key, { type: "json" });
-      if (rec && rec.exp > Date.now()) { MEM.set(key, rec); return rec.data; }
-    } catch (_) {}
-  }
+  if (m) MEM.delete(key);
   return null;
 }
-async function cacheSet(key, data) {
-  const rec = { exp: Date.now() + TTL_MS, data };
-  MEM.set(key, rec);
-  if (getStore) {
-    try { await getStore("answerz-sos").setJSON(key, rec); } catch (_) {}
-  }
+function cacheSet(key, data) {
+  if (MEM.size >= MEM_MAX) { const first = MEM.keys().next().value; if (first) MEM.delete(first); }
+  MEM.set(key, { exp: Date.now() + TTL_MS, data });
 }
 
 function resolveGeo(input) {
@@ -242,7 +234,7 @@ exports.handler = async (event) => {
 
   // ---- Serve from cache if we've run this exact request in the last 24h ----
   const key0 = cacheKey({ brand, geo, category, competitors });
-  const hit = await cacheGet(key0);
+  const hit = cacheGet(key0);
   if (hit) {
     return { statusCode: 200, headers: JSON_HEADERS, body: JSON.stringify(Object.assign({}, hit, { cached: true })) };
   }
@@ -265,7 +257,7 @@ exports.handler = async (event) => {
     questionCount: questions.length,
     source: "Google Trends (relative) via SerpApi + People Also Ask + autocomplete"
   };
-  await cacheSet(key0, payload);
+  cacheSet(key0, payload);
 
   return { statusCode: 200, headers: JSON_HEADERS, body: JSON.stringify(payload) };
 };
