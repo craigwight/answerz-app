@@ -23,6 +23,36 @@ const JSON_HEADERS = {
   "cache-control": "no-store"
 };
 
+// ---- Result cache: durable via Netlify Blobs, in-memory fallback ----
+// Repeat brand checks (same brand+market+rivals) inside the TTL cost 0 SerpApi credits.
+let getStore = null;
+try { ({ getStore } = require("@netlify/blobs")); } catch (_) { getStore = null; }
+const MEM = new Map();                      // key -> { exp, data }
+const TTL_MS = 24 * 60 * 60 * 1000;         // 24h
+
+function cacheKey(o) {
+  return [o.brand, o.geo, o.category || "", (o.competitors || []).join("|")]
+    .join("::").toLowerCase().replace(/\s+/g, " ").trim();
+}
+async function cacheGet(key) {
+  const m = MEM.get(key);
+  if (m && m.exp > Date.now()) return m.data;
+  if (getStore) {
+    try {
+      const rec = await getStore("answerz-sos").get(key, { type: "json" });
+      if (rec && rec.exp > Date.now()) { MEM.set(key, rec); return rec.data; }
+    } catch (_) {}
+  }
+  return null;
+}
+async function cacheSet(key, data) {
+  const rec = { exp: Date.now() + TTL_MS, data };
+  MEM.set(key, rec);
+  if (getStore) {
+    try { await getStore("answerz-sos").setJSON(key, rec); } catch (_) {}
+  }
+}
+
 function resolveGeo(input) {
   const s = (input || "South Africa").trim();
   if (/^[A-Za-z]{2}$/.test(s)) return s.toUpperCase();
@@ -210,6 +240,13 @@ exports.handler = async (event) => {
 
   const terms = [brand, ...competitors];
 
+  // ---- Serve from cache if we've run this exact request in the last 24h ----
+  const key0 = cacheKey({ brand, geo, category, competitors });
+  const hit = await cacheGet(key0);
+  if (hit) {
+    return { statusCode: 200, headers: JSON_HEADERS, body: JSON.stringify(Object.assign({}, hit, { cached: true })) };
+  }
+
   // Run Trends and the question bank IN PARALLEL (keeps us well under the timeout)
   const [trends, questions] = await Promise.all([
     runTrends(terms, brand, geo, key),
@@ -217,16 +254,18 @@ exports.handler = async (event) => {
   ]);
 
   if (trends.error) {
+    // don't cache failures — next call should retry live
     return { statusCode: 502, headers: JSON_HEADERS, body: JSON.stringify({ error: trends.error }) };
   }
 
-  return {
-    statusCode: 200, headers: JSON_HEADERS, body: JSON.stringify({
-      brand, geo, category, timeframe: "today 12-m",
-      leaderboard: trends.sorted, you: trends.you, leader: trends.leader, gapX: trends.gapX,
-      questions: questions.slice(0, 8),
-      questionCount: questions.length,
-      source: "Google Trends (relative) via SerpApi + People Also Ask + autocomplete"
-    })
+  const payload = {
+    brand, geo, category, timeframe: "today 12-m",
+    leaderboard: trends.sorted, you: trends.you, leader: trends.leader, gapX: trends.gapX,
+    questions: questions.slice(0, 8),
+    questionCount: questions.length,
+    source: "Google Trends (relative) via SerpApi + People Also Ask + autocomplete"
   };
+  await cacheSet(key0, payload);
+
+  return { statusCode: 200, headers: JSON_HEADERS, body: JSON.stringify(payload) };
 };
