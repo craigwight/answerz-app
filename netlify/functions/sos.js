@@ -1,6 +1,6 @@
 // Answerz — Share of Search engine
-// GET /api/sos?brand=Environ&category=Skincare&market=South Africa&competitors=The Ordinary,CeraVe,Dermalogica
-// Pulls live Google Trends via SerpApi + a real question bank via Google autocomplete.
+// GET /api/sos?brand=&category=&market=&competitors=   -> full Share of Search + question bank
+// GET /api/sos?mode=suggest&brand=&market=             -> suggested competitors only (free)
 
 const GEO = {
   "south africa": "ZA", "za": "ZA",
@@ -29,21 +29,130 @@ function resolveGeo(input) {
   return GEO[s.toLowerCase()] || "ZA";
 }
 
+function titleCase(s) {
+  return s.replace(/\w\S*/g, t => t.charAt(0).toUpperCase() + t.slice(1));
+}
+
+// Free Google autocomplete suggestions
+async function autocomplete(seed, gl) {
+  try {
+    const su = new URL("https://www.google.com/complete/search");
+    su.searchParams.set("client", "firefox");
+    su.searchParams.set("hl", "en");
+    su.searchParams.set("gl", gl);
+    su.searchParams.set("q", seed);
+    const r = await fetch(su.toString(), { headers: { "user-agent": "Mozilla/5.0" } });
+    const t = await r.text();
+    let a = null; try { a = JSON.parse(t); } catch (_) {}
+    return (a && Array.isArray(a[1])) ? a[1].map(String) : [];
+  } catch (_) { return []; }
+}
+
+// SerpApi Google "People Also Ask" — real, well-formed buyer questions
+async function paa(query, geo, key) {
+  try {
+    const u = new URL("https://serpapi.com/search.json");
+    u.searchParams.set("engine", "google");
+    u.searchParams.set("q", query);
+    u.searchParams.set("gl", geo.toLowerCase());
+    u.searchParams.set("hl", "en");
+    u.searchParams.set("api_key", key);
+    const r = await fetch(u.toString());
+    const j = await r.json();
+    return (j.related_questions || []).map(x => x.question).filter(Boolean);
+  } catch (_) { return []; }
+}
+
+// Suggest competitors from autocomplete comparison intent (free — no SerpApi cost)
+async function suggestCompetitors(brand, gl) {
+  const bl = brand.toLowerCase().trim();
+  const seeds = [brand + " vs ", brand + " or ", "brands like " + brand, brand + " alternative"];
+  const res = await Promise.all(seeds.map(s => autocomplete(s, gl)));
+  const counts = {};
+  res.flat().forEach(sug => {
+    let low = ("" + sug).toLowerCase().trim();
+    let tail = null;
+    if (low.includes(" vs ")) tail = low.split(" vs ").pop();
+    else if (low.includes(" or ")) tail = low.split(" or ").pop();
+    else if (low.startsWith("brands like ")) tail = low.slice("brands like ".length);
+    else if (low.includes(" like ")) tail = low.split(" like ").pop();
+    if (!tail) return;
+    tail = tail.replace(/[?]/g, "").replace(/\b(review|reviews|price|reddit|20\d\d|south africa|which is better)\b/g, "").trim();
+    if (!tail || tail === bl || tail.length < 2) return;
+    const name = tail.split(/\s+/).slice(0, 3).join(" ").trim();
+    if (!name || name === bl) return;
+    counts[name] = (counts[name] || 0) + 1;
+  });
+  const ranked = Object.keys(counts).filter(n => n.length >= 2).sort((a, b) => counts[b] - counts[a]);
+  const out = [], seen = new Set();
+  for (const n of ranked) {
+    const k = n.replace(/\s+/g, "");
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(titleCase(n));
+    if (out.length >= 4) break;
+  }
+  return out;
+}
+
+// Build a quality question bank: People Also Ask (real) + filtered autocomplete
+async function buildQuestions(brand, category, geo, key) {
+  const seedBase = category || brand;
+  const gl = geo.toLowerCase();
+  const seen = new Set();
+  const out = [];
+  const qwords = ["how", "why", "is", "are", "can", "does", "do", "what", "which", "should", "when", "will", "where"];
+
+  // 1) People Also Ask — real, complete questions (2 SerpApi lookups)
+  const paaSeeds = [seedBase, `best ${seedBase}`];
+  const paaRes = await Promise.all(paaSeeds.map(s => paa(s, geo, key)));
+  paaRes.flat().forEach(q => {
+    let t = ("" + q).trim();
+    const low = t.toLowerCase();
+    if (!t || seen.has(low) || t.length > 110) return;
+    seen.add(low);
+    out.push({ q: t, platform: "Google" });
+  });
+
+  // 2) Autocomplete supplements (free) — comparison + intent seeds, strict filter
+  const acSeeds = [`${brand} vs`, `why is my`, `does ${seedBase}`, `how to use ${seedBase}`, `best ${seedBase} for`, `can i use`, `${brand} vs the`, `is ${seedBase} good`];
+  const acRes = await Promise.all(acSeeds.map(s => autocomplete(s, gl)));
+  acRes.flat().forEach(s => {
+    let t = ("" + s).trim();
+    const low = t.toLowerCase();
+    const words = low.split(/\s+/);
+    const isQ = qwords.includes(words[0]) || low.includes(" vs ");
+    if (!isQ || words.length < 4) return;               // drop fragments like "how to skincare"
+    if (seen.has(low) || t.length < 14 || t.length > 95) return;
+    seen.add(low);
+    const clean = t.replace(/\?+$/, "");
+    out.push({ q: clean.charAt(0).toUpperCase() + clean.slice(1) + "?", platform: "Google" });
+  });
+
+  return out;
+}
+
 exports.handler = async (event) => {
   const p = event.queryStringParameters || {};
   const brand = (p.brand || "").trim();
-  const category = (p.category || "").trim();
   const geo = resolveGeo(p.geo || p.market);
-  const competitors = (p.competitors || "")
-    .split(",").map(s => s.trim()).filter(Boolean).slice(0, 4);
-  const key = process.env.SERPAPI_KEY;
 
   if (!brand) return { statusCode: 400, headers: JSON_HEADERS, body: JSON.stringify({ error: "Missing brand" }) };
-  if (!key)   return { statusCode: 500, headers: JSON_HEADERS, body: JSON.stringify({ error: "SERPAPI_KEY is not set on the server. Add it in Netlify → Site settings → Environment variables." }) };
+
+  // ---- MODE: competitor suggestions (free, no key required) ----
+  if ((p.mode || "") === "suggest") {
+    const competitors = await suggestCompetitors(brand, geo.toLowerCase());
+    return { statusCode: 200, headers: JSON_HEADERS, body: JSON.stringify({ brand, competitors }) };
+  }
+
+  const category = (p.category || "").trim();
+  const competitors = (p.competitors || "").split(",").map(s => s.trim()).filter(Boolean).slice(0, 4);
+  const key = process.env.SERPAPI_KEY;
+  if (!key) return { statusCode: 500, headers: JSON_HEADERS, body: JSON.stringify({ error: "SERPAPI_KEY is not set on the server. Add it in Netlify → Site settings → Environment variables." }) };
 
   const terms = [brand, ...competitors];
 
-  // ---------- 1) Google Trends (Share of Search) via SerpApi ----------
+  // ---- Google Trends (Share of Search) via SerpApi ----
   let sorted, you, leader, gapX;
   try {
     const u = new URL("https://serpapi.com/search.json");
@@ -53,14 +162,11 @@ exports.handler = async (event) => {
     u.searchParams.set("date", "today 12-m");
     u.searchParams.set("data_type", "TIMESERIES");
     u.searchParams.set("api_key", key);
-
     const r = await fetch(u.toString());
     const j = await r.json();
     if (j.error) throw new Error(j.error);
-
     const timeline = (j.interest_over_time && j.interest_over_time.timeline_data) || [];
-    const sums = terms.map(() => 0);
-    const counts = terms.map(() => 0);
+    const sums = terms.map(() => 0), counts = terms.map(() => 0);
     timeline.forEach(pt => {
       (pt.values || []).forEach((v, i) => {
         const val = typeof v.extracted_value === "number" ? v.extracted_value : (parseFloat(v.value) || 0);
@@ -69,7 +175,6 @@ exports.handler = async (event) => {
     });
     const avgs = terms.map((t, i) => counts[i] ? sums[i] / counts[i] : 0);
     const total = avgs.reduce((a, b) => a + b, 0) || 1;
-
     const board = terms.map((t, i) => ({
       name: t,
       avg: Math.round(avgs[i] * 10) / 10,
@@ -84,48 +189,15 @@ exports.handler = async (event) => {
     return { statusCode: 502, headers: JSON_HEADERS, body: JSON.stringify({ error: "Google Trends fetch failed: " + e.message }) };
   }
 
-  // ---------- 2) Question bank via Google autocomplete (free) ----------
-  const gl = geo.toLowerCase();
-  const seedBase = category || brand;
-  const seeds = [
-    seedBase, `best ${seedBase}`, `how to ${seedBase}`, `${seedBase} for`,
-    `is ${brand}`, `${brand} vs`, `why is my`, `how do i`, `can i use`, `what is the best ${seedBase}`
-  ];
-  const qWords = ["how", "why", "is", "are", "can", "does", "do", "what", "which", "should", "when", "will"];
-  const seen = new Set();
-  const questions = [];
+  const questions = await buildQuestions(brand, category, geo, key);
 
-  await Promise.all(seeds.map(async (seed) => {
-    try {
-      const su = new URL("https://www.google.com/complete/search");
-      su.searchParams.set("client", "firefox");
-      su.searchParams.set("hl", "en");
-      su.searchParams.set("gl", gl);
-      su.searchParams.set("q", seed);
-      const rr = await fetch(su.toString(), { headers: { "user-agent": "Mozilla/5.0" } });
-      const txt = await rr.text();
-      let arr = null;
-      try { arr = JSON.parse(txt); } catch (_) { arr = null; }
-      const sugg = (arr && Array.isArray(arr[1])) ? arr[1] : [];
-      sugg.forEach(s => {
-        const t = ("" + s).trim();
-        const low = t.toLowerCase();
-        const isQuestion = qWords.some(w => low.startsWith(w + " ")) || low.includes(" vs ");
-        if (isQuestion && !seen.has(low) && t.length >= 8 && t.length <= 90) {
-          seen.add(low);
-          questions.push({ q: t.charAt(0).toUpperCase() + t.slice(1), platform: "Google" });
-        }
-      });
-    } catch (_) { /* ignore a single seed failing */ }
-  }));
-
-  const body = {
-    brand, geo, category, timeframe: "today 12-m",
-    leaderboard: sorted,
-    you, leader, gapX,
-    questions: questions.slice(0, 8),
-    questionCount: questions.length,
-    source: "Google Trends (relative, web search) via SerpApi + Google autocomplete"
+  return {
+    statusCode: 200, headers: JSON_HEADERS, body: JSON.stringify({
+      brand, geo, category, timeframe: "today 12-m",
+      leaderboard: sorted, you, leader, gapX,
+      questions: questions.slice(0, 8),
+      questionCount: questions.length,
+      source: "Google Trends (relative) via SerpApi + People Also Ask + autocomplete"
+    })
   };
-  return { statusCode: 200, headers: JSON_HEADERS, body: JSON.stringify(body) };
 };
