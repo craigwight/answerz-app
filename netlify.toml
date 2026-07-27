@@ -7,3 +7,11 @@
   from = "/api/*"
   to = "/.netlify/functions/:splat"
   status = 200
+
+# DataForSEO live endpoints can take 15-20s. Default is 10s, so raise it.
+[functions]
+  node_bundler = "esbuild"
+
+[functions."sos"]
+  # seconds; Netlify allows up to 26 on paid plans
+  timeout = 26
