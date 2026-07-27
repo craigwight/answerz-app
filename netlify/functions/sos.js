@@ -89,7 +89,8 @@ function seriesFrom(json, count) {
 // A term with a zero average means the platform has no data for that string —
 // not that the brand owns none of the category. Those are different findings
 // and must never be shown as "0% share".
-const MIN_USABLE = 0.5;
+const NO_DATA = 0;          // literally nothing returned
+const DWARF_RATIO = 60;     // leader this many times bigger = mismatched set
 
 // Try real Google Trends, fall back to DataForSEO Trends.
 async function runTrends(terms, brand, mkt) {
@@ -116,28 +117,35 @@ async function runTrends(terms, brand, mkt) {
     source = "DataForSEO Trends";
   }
 
-  // Which terms actually returned data?
-  const noData = kws.filter((t,i) => avgs[i] < MIN_USABLE);
-  const withData = kws.filter((t,i) => avgs[i] >= MIN_USABLE);
-
-  // If the brand itself has no data, a share number is meaningless — say so.
+  const noData   = kws.filter((t,i) => avgs[i] <= NO_DATA);
+  const withData = kws.filter((t,i) => avgs[i] >  NO_DATA);
   const brandIdx = kws.findIndex(t => t.toLowerCase() === brand.toLowerCase());
-  if (brandIdx === -1 || avgs[brandIdx] < MIN_USABLE) {
+  const maxAvg   = Math.max.apply(null, avgs);
+  const biggest  = kws[avgs.indexOf(maxAvg)];
+
+  // Nothing at all for the brand — almost always a badly formed search term.
+  if (brandIdx === -1 || avgs[brandIdx] <= NO_DATA) {
     const err = new Error("INSUFFICIENT_DATA");
-    err.insufficient = true;
-    err.noData = noData;
-    err.withData = withData;
-    err.brandHasData = false;
+    err.insufficient = true; err.reason = "no_brand_data";
+    err.noData = noData; err.withData = withData;
     throw err;
   }
 
-  // Fewer than two terms with data isn't a comparison.
+  // Not enough terms to compare against.
   if (withData.length < 2) {
     const err = new Error("INSUFFICIENT_DATA");
-    err.insufficient = true;
-    err.noData = noData;
-    err.withData = withData;
-    err.brandHasData = true;
+    err.insufficient = true; err.reason = "too_few_terms";
+    err.noData = noData; err.withData = withData;
+    throw err;
+  }
+
+  // The brand has real demand but a giant in the set has flattened it.
+  // Google Trends is relative, so this is a set-selection problem, not a result.
+  if (maxAvg / avgs[brandIdx] > DWARF_RATIO) {
+    const err = new Error("INSUFFICIENT_DATA");
+    err.insufficient = true; err.reason = "mismatched_set";
+    err.biggest = biggest;
+    err.noData = noData; err.withData = withData;
     throw err;
   }
 
@@ -145,8 +153,8 @@ async function runTrends(terms, brand, mkt) {
   const board = kws.map((t,i) => ({
     name: t,
     avg: Math.round(avgs[i]*10)/10,
-    share: avgs[i] < MIN_USABLE ? null : Math.round((avgs[i]/total)*100),
-    noData: avgs[i] < MIN_USABLE,
+    share: avgs[i] <= NO_DATA ? null : Math.round((avgs[i]/total)*100),
+    noData: avgs[i] <= NO_DATA,
     you: t.toLowerCase() === brand.toLowerCase()
   })).sort((a,b) => b.avg - a.avg);
 
@@ -233,16 +241,29 @@ exports.handler = async (event) => {
     const r = t.reason || {};
     if (r.insufficient) {
       const bad = (r.noData || []).join('", "');
+      let title, message, hint;
+      if (r.reason === "mismatched_set") {
+        title   = "These brands aren't comparable.";
+        message = '"' + r.biggest + '" is many times larger than ' + brand +
+                  ', so on a relative scale everything else rounds to zero. '
+                  + 'That tells you about the size gap, not about your share.';
+        hint    = "Compare against rivals of a similar size — the ones a buyer would actually choose between.";
+      } else if (r.reason === "too_few_terms") {
+        title   = "Not enough rivals with search data.";
+        message = 'We found data for "' + brand + '" but not for enough competitors to build a comparison.';
+        hint    = "Try two or three well-known brand names in your category.";
+      } else {
+        title   = "Not enough search data for these terms.";
+        message = 'There is no measurable search data for "' + bad + '". '
+                  + 'Use the brand name on its own — location words, taglines and brackets have almost no search volume.';
+        hint    = "Short brand names only. No cities, no descriptions, no brackets.";
+      }
       return { statusCode:200, headers:HDRS, body:JSON.stringify({
-        insufficientData: true,
+        insufficientData: true, reason: r.reason,
         brand, market: mkt,
-        noDataTerms: r.noData || [],
-        withDataTerms: r.withData || [],
-        error: "Not enough search data for these terms.",
-        message: r.brandHasData
-          ? 'We found data for "' + brand + '" but not for enough rivals to compare. Try well-known competitor brand names.'
-          : 'Google has no measurable search data for "' + bad + '". Use the brand name on its own — "Carlton Oasis", not "Carlton Oasis in Spijkenisse". Location words and descriptions have almost no search volume.',
-        hint: "Short brand names only. No cities, no taglines, no brackets."
+        noDataTerms: r.noData || [], withDataTerms: r.withData || [],
+        biggest: r.biggest || null,
+        error: title, message, hint
       })};
     }
     return { statusCode:502, headers:HDRS, body:JSON.stringify({
