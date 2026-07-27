@@ -602,8 +602,8 @@
       var bad = (d.noDataTerms||[]).map(function(t){return '“'+t+'”';}).join(', ');
       document.getElementById('result').innerHTML =
         '<div class="card" style="max-width:720px;margin:0 auto;text-align:left">'
-        + '<div class="ctag" style="color:#FFD600">⚠ Not enough search data</div>'
-        + '<h2 style="margin:10px 0 14px">We can\'t give you a number for these terms.</h2>'
+        + '<div class="ctag" style="color:#FFD600">⚠ '+(d.reason==="mismatched_set"?"Mismatched comparison":"Not enough search data")+'</div>'
+        + '<h2 style="margin:10px 0 14px">'+(d.error||'We can\'t give you a number for these terms.')+'</h2>'
         + '<p style="color:#9a9a9a;line-height:1.6;margin-bottom:14px">' + (d.message||'') + '</p>'
         + (bad ? '<p style="color:#9a9a9a;line-height:1.6;margin-bottom:14px">No measurable volume for: <b style="color:#fff">'+bad+'</b></p>' : '')
         + '<p style="color:#9a9a9a;line-height:1.6;margin-bottom:20px"><b style="color:#D8FE69">'
