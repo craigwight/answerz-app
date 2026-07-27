@@ -86,6 +86,11 @@ function seriesFrom(json, count) {
   return avgs;
 }
 
+// A term with a zero average means the platform has no data for that string —
+// not that the brand owns none of the category. Those are different findings
+// and must never be shown as "0% share".
+const MIN_USABLE = 0.5;
+
 // Try real Google Trends, fall back to DataForSEO Trends.
 async function runTrends(terms, brand, mkt) {
   const kws = terms.slice(0,5);
@@ -111,20 +116,47 @@ async function runTrends(terms, brand, mkt) {
     source = "DataForSEO Trends";
   }
 
+  // Which terms actually returned data?
+  const noData = kws.filter((t,i) => avgs[i] < MIN_USABLE);
+  const withData = kws.filter((t,i) => avgs[i] >= MIN_USABLE);
+
+  // If the brand itself has no data, a share number is meaningless — say so.
+  const brandIdx = kws.findIndex(t => t.toLowerCase() === brand.toLowerCase());
+  if (brandIdx === -1 || avgs[brandIdx] < MIN_USABLE) {
+    const err = new Error("INSUFFICIENT_DATA");
+    err.insufficient = true;
+    err.noData = noData;
+    err.withData = withData;
+    err.brandHasData = false;
+    throw err;
+  }
+
+  // Fewer than two terms with data isn't a comparison.
+  if (withData.length < 2) {
+    const err = new Error("INSUFFICIENT_DATA");
+    err.insufficient = true;
+    err.noData = noData;
+    err.withData = withData;
+    err.brandHasData = true;
+    throw err;
+  }
+
   const total = avgs.reduce((a,b)=>a+b,0) || 1;
   const board = kws.map((t,i) => ({
     name: t,
     avg: Math.round(avgs[i]*10)/10,
-    share: Math.round((avgs[i]/total)*100),
+    share: avgs[i] < MIN_USABLE ? null : Math.round((avgs[i]/total)*100),
+    noData: avgs[i] < MIN_USABLE,
     you: t.toLowerCase() === brand.toLowerCase()
   })).sort((a,b) => b.avg - a.avg);
 
   const you = board.find(x => x.you) || board[board.length-1];
-  const leader = board[0];
+  const leader = board.find(x => !x.noData) || board[0];
   return {
     sorted: board, you, leader,
     gapX: (you && you.avg > 0) ? Math.round((leader.avg/you.avg)*10)/10 : null,
-    source, fallbackReason: note
+    source, fallbackReason: note,
+    noDataTerms: noData
   };
 }
 
@@ -198,9 +230,24 @@ exports.handler = async (event) => {
   const [t, q] = await Promise.allSettled([ runTrends(terms,brand,mkt), questions(brand,category,mkt) ]);
 
   if (t.status !== "fulfilled") {
+    const r = t.reason || {};
+    if (r.insufficient) {
+      const bad = (r.noData || []).join('", "');
+      return { statusCode:200, headers:HDRS, body:JSON.stringify({
+        insufficientData: true,
+        brand, market: mkt,
+        noDataTerms: r.noData || [],
+        withDataTerms: r.withData || [],
+        error: "Not enough search data for these terms.",
+        message: r.brandHasData
+          ? 'We found data for "' + brand + '" but not for enough rivals to compare. Try well-known competitor brand names.'
+          : 'Google has no measurable search data for "' + bad + '". Use the brand name on its own — "Carlton Oasis", not "Carlton Oasis in Spijkenisse". Location words and descriptions have almost no search volume.',
+        hint: "Short brand names only. No cities, no taglines, no brackets."
+      })};
+    }
     return { statusCode:502, headers:HDRS, body:JSON.stringify({
       error: "We couldn't pull your search data just now.",
-      detail: String(t.reason && t.reason.message || t.reason)
+      detail: String(r.message || r)
     })};
   }
 
@@ -210,6 +257,7 @@ exports.handler = async (event) => {
     leaderboard: t.value.sorted, you: t.value.you, leader: t.value.leader, gapX: t.value.gapX,
     questions: qs.slice(0,8), questionCount: qs.length,
     source: t.value.source,
+    noDataTerms: t.value.noDataTerms || [],
     sourceNote: t.value.source === "Google Trends"
       ? "Live Google Trends · relative interest · past 12 months"
       : "Search demand index · relative interest · past 12 months"
