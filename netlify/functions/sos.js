@@ -56,14 +56,19 @@ async function dfsPost(path, body, ms) {
   const ctrl = new AbortController();
   const id = setTimeout(() => ctrl.abort(), ms);
   try {
+    const started = Date.now();
     const r = await withTimeout(fetch(DFS + path, {
       method: "POST",
       headers: { "authorization": "Basic " + auth, "content-type": "application/json" },
       body: JSON.stringify(body),
       signal: ctrl.signal
     }), ms + 500, path);
+    if (r.status === 401) throw new Error("DataForSEO rejected the credentials (401). Check DATAFORSEO_LOGIN and DATAFORSEO_PASSWORD.");
+    if (r.status === 402) throw new Error("DataForSEO says the account is out of funds (402).");
     const j = await r.json();
-    if (j.status_code && j.status_code !== 20000) throw new Error(j.status_message || ("DataForSEO error " + j.status_code));
+    if (j.status_code && j.status_code !== 20000) {
+      throw new Error("DataForSEO " + j.status_code + ": " + (j.status_message || "unknown") + " (took " + (Date.now()-started) + "ms)");
+    }
     return j;
   } finally { clearTimeout(id); }
 }
@@ -83,7 +88,7 @@ async function runTrends(terms, brand, market) {
     language_code: "en",
     time_range: "past_12_months",
     item_types: ["google_trends_graph"]
-  }], 12000);
+  }], 22000);
 
   const task = (j.tasks || [])[0];
   if (!task) throw new Error("No response from Google Trends.");
@@ -121,7 +126,7 @@ async function buildQuestions(brand, category, market) {
   const results = await Promise.allSettled(queries.map(q =>
     dfsPost("/serp/google/organic/live/advanced", [{
       keyword: q, location_name: market, language_code: "en", depth: 20
-    }], 12000)
+    }], 15000)
   ));
   results.forEach(r => {
     if (r.status !== "fulfilled") return;
@@ -145,7 +150,7 @@ async function suggestCompetitors(brand, market) {
   try {
     const j = await dfsPost("/serp/google/organic/live/advanced", [{
       keyword: brand + " alternative", location_name: market, language_code: "en", depth: 10
-    }], 9000);
+    }], 12000);
     const res = (((j.tasks || [])[0] || {}).result || [])[0] || {};
     const pool = [];
     (res.items || []).forEach(it => {
@@ -211,7 +216,11 @@ exports.handler = async (event) => {
   if (trendsR.status !== "fulfilled") {
     return {
       statusCode: 502, headers: JSON_HEADERS,
-      body: JSON.stringify({ error: "Share of Search is temporarily unavailable: " + trendsR.reason.message })
+      body: JSON.stringify({
+        error: "Share of Search is temporarily unavailable.",
+        detail: String(trendsR.reason && trendsR.reason.message || trendsR.reason),
+        hint: "If this says 'aborted', the DataForSEO live endpoint exceeded the time limit. If it says 401, the credentials are wrong."
+      })
     };
   }
   const trends = trendsR.value;
