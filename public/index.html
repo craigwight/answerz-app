@@ -370,10 +370,10 @@
       <label class="cflabel">Compare you against — 2–4 rivals in <span id="cMarketLbl">South Africa</span></label>
       <div class="chips" id="cChips"></div>
       <div class="addrow">
-        <input id="cAdd" placeholder="Add a competitor…" onkeydown="if(event.key==='Enter'){addChip();event.preventDefault();}">
+        <input id="cAdd" placeholder="Competitor brand name…" onkeydown="if(event.key==='Enter'){addChip();event.preventDefault();}">
         <button onclick="addChip()">+ Add</button>
       </div>
-      <div class="cfhint">Tip: 3–4 rivals gives the sharpest read — the aspirational leader plus your direct competitors. Change the market above and we'll re-suggest.</div>
+      <div class="cfhint">Tip: use brand names only — “Carlton Oasis”, not “Carlton Oasis in Spijkenisse”. Location words have almost no search volume. 3–4 rivals gives the sharpest read — the aspirational leader plus your direct competitors. Change the market above and we'll re-suggest.</div>
  
       <button class="runbtn" onclick="runFromConfirm()">Run my Share of Search →</button>
       <div class="cfback" onclick="goHome()">← use a different brand</div>
@@ -595,6 +595,24 @@
  
   function renderResult(d){
     document.getElementById('result').classList.add('on');
+ 
+    // No usable search data — say so plainly rather than showing a 0% that
+    // looks like a finding. Zero data and zero share are not the same thing.
+    if (d.insufficientData) {
+      var bad = (d.noDataTerms||[]).map(function(t){return '“'+t+'”';}).join(', ');
+      document.getElementById('result').innerHTML =
+        '<div class="card" style="max-width:720px;margin:0 auto;text-align:left">'
+        + '<div class="ctag" style="color:#FFD600">⚠ Not enough search data</div>'
+        + '<h2 style="margin:10px 0 14px">We can\'t give you a number for these terms.</h2>'
+        + '<p style="color:#9a9a9a;line-height:1.6;margin-bottom:14px">' + (d.message||'') + '</p>'
+        + (bad ? '<p style="color:#9a9a9a;line-height:1.6;margin-bottom:14px">No measurable volume for: <b style="color:#fff">'+bad+'</b></p>' : '')
+        + '<p style="color:#9a9a9a;line-height:1.6;margin-bottom:20px"><b style="color:#D8FE69">'
+        + (d.hint||'Short brand names only.') + '</b></p>'
+        + '<a href="#" onclick="goHome();return false;" class="runbtn" style="display:inline-block;text-decoration:none">← Try again with brand names</a>'
+        + '</div>';
+      return;
+    }
+ 
     document.getElementById('rBrand').textContent=d.brand;
     document.getElementById('rCat').textContent=d.category||'your category';
     document.getElementById('rMarket').textContent=lastMarket||d.geo||'';
@@ -604,7 +622,9 @@
     var you=d.you||{share:0}, leader=d.leader||{};
     lastResult={brand:d.brand||'', market:(lastMarket||d.geo||''), category:(d.category||''),
       share:(you.share||0), leader:((leader&&leader.name)||''), gap:(d.gapX||'')};
-    var claim='You own just <b>'+(you.share||0)+'%</b> of category search.';
+    var claim = you.noData
+      ? 'We have no measurable search data for <b>'+(you.name||d.brand)+'</b>.'
+      : 'You own <b>'+(you.share||0)+'%</b> of category search.';
     if(leader && leader.name && leader.name.toLowerCase()!==(d.brand||'').toLowerCase()){
       claim+=' <b>'+esc(leader.name)+'</b> owns '+leader.share+'%.';
     }
