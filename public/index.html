@@ -332,19 +332,37 @@
 
       <label class="cflabel">Market</label>
       <select class="cfinput" id="cMarket" onchange="marketChanged()">
-        <option value="South Africa" selected>South Africa</option>
-        <option value="Nigeria">Nigeria</option>
-        <option value="Kenya">Kenya</option>
-        <option value="Namibia">Namibia</option>
-        <option value="Botswana">Botswana</option>
-        <option value="United Kingdom">United Kingdom</option>
-        <option value="United States">United States</option>
-        <option value="Australia">Australia</option>
-        <option value="India">India</option>
-        <option value="Canada">Canada</option>
-        <option value="Germany">Germany</option>
-        <option value="France">France</option>
-      </select>
+  <optgroup label="Europe">
+    <option value="Netherlands">Netherlands</option>
+    <option value="United Kingdom">United Kingdom</option>
+    <option value="Germany">Germany</option>
+    <option value="France">France</option>
+    <option value="Belgium">Belgium</option>
+    <option value="Ireland">Ireland</option>
+    <option value="Spain">Spain</option>
+    <option value="Italy">Italy</option>
+    <option value="Poland">Poland</option>
+    <option value="Sweden">Sweden</option>
+    <option value="Denmark">Denmark</option>
+    <option value="Norway">Norway</option>
+    <option value="Austria">Austria</option>
+    <option value="Switzerland">Switzerland</option>
+    <option value="Portugal">Portugal</option>
+  </optgroup>
+  <optgroup label="Africa">
+    <option value="South Africa" selected>South Africa</option>
+    <option value="Nigeria">Nigeria</option>
+    <option value="Kenya">Kenya</option>
+    <option value="Namibia">Namibia</option>
+    <option value="Botswana">Botswana</option>
+  </optgroup>
+  <optgroup label="Rest of world">
+    <option value="United States">United States</option>
+    <option value="Canada">Canada</option>
+    <option value="Australia">Australia</option>
+    <option value="India">India</option>
+  </optgroup>
+</select>
 
       <label class="cflabel">Category</label>
       <input class="cfinput" id="cCategory" placeholder="e.g. Skincare">
