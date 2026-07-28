@@ -6,22 +6,15 @@
 //     { "brand": "Dr Oetker",
 //       "market": "South Africa",
 //       "domains": ["droetker.co.za"],
-//       "questions": [ {"cluster":"01 launch","q":"what is a calzone"}, ... ] }
+//       "questions": [ {"cluster":"01 launch","q":"what is a calzone"} ] }
 //
 //   GET  /api/answerz-share?brand=X&market=Y&q=question one|question two
 //
-// Max 5 questions per call — enough to stay inside the function timeout.
-// For each question it runs a clean, location-locked Google SERP through
-// DataForSEO and records whether the brand comes back, where, who holds the
-// slots instead, and what the AI Overview says.
-//
-// Output maps 1:1 onto the SCORING tab of the Answerz Share workbook.
-//
-// Env: DATAFORSEO_LOGIN, DATAFORSEO_PASSWORD
+// Max 5 questions per call. Env: DATAFORSEO_LOGIN, DATAFORSEO_PASSWORD
 
 const DFS = "https://api.dataforseo.com/v3";
-const BATCH = 5;                    // questions per request — keeps us inside the function timeout
-const DEPTH = 20;                   // how far down the SERP we look
+const BATCH = 5;
+const DEPTH = 20;
 
 const HDRS = {
   "content-type": "application/json",
@@ -29,11 +22,9 @@ const HDRS = {
   "cache-control": "no-store"
 };
 
-
-// ── classify who holds a result, so "who owns it now" fills itself ──
 const CREATOR  = ["tiktok.com","youtube.com","instagram.com","facebook.com","reddit.com","pinterest.com"];
 const RETAILER = ["checkers.co.za","picknpay.co.za","spar.co.za","takealot.com","woolworths.co.za",
-                  "makro.co.za","shoprite.co.za","game.co.za","zando","onecart","sixty60"];
+                  "makro.co.za","shoprite.co.za","game.co.za","sixty60"];
 
 function classify(domain, brandDomains) {
   const d = (domain || "").toLowerCase();
@@ -93,11 +84,10 @@ function readOne(json, brand, brandDomains) {
   const paa = (items.find(i => i.type === "people_also_ask") || {}).items || [];
   const rel = (items.find(i => i.type === "related_searches") || {}).items || [];
 
-  // ── Google AI Overview · arrives inside the same SERP call, no extra cost ──
+  // Google AI Overview — arrives in the same SERP call, no extra cost
   const aio = items.find(i => i.type === "ai_overview");
   let aiOverview = { present: false };
   if (aio) {
-    // the summary text is spread across nested item blocks
     const parts = [];
     const walk = n => {
       if (!n || typeof n !== "object") return;
@@ -108,7 +98,6 @@ function readOne(json, brand, brandDomains) {
     walk(aio);
     const text = parts.join(" ").replace(/\s+/g, " ").trim();
 
-    // every source the overview cites
     const refs = [];
     const grabRefs = n => {
       if (!n || typeof n !== "object") return;
@@ -119,16 +108,14 @@ function readOne(json, brand, brandDomains) {
     };
     grabRefs(aio);
 
-    const bl2 = brand.toLowerCase();
-    const namedInText = text.toLowerCase().includes(bl2);
+    const namedInText = text.toLowerCase().includes(bl);
     const citedRef = refs.find(r => brandDomains.some(b => (r.domain||"").toLowerCase().includes(b)));
 
     aiOverview = {
       present: true,
-      brandNamed: namedInText,            // brand mentioned in the answer itself
-      brandCited: !!citedRef,             // brand's own page used as a source
+      brandNamed: namedInText,
+      brandCited: !!citedRef,
       citedUrl: citedRef ? citedRef.url : null,
-      // mentioned but not cited is the common, weak state
       status: citedRef ? "Cited" : namedInText ? "Named only" : "Absent",
       sources: refs.slice(0, 8).map(r => ({
         domain: r.domain, who: classify(r.domain, brandDomains), title: r.title
@@ -158,7 +145,6 @@ function readOne(json, brand, brandDomains) {
 exports.handler = async (event) => {
   const p = event.queryStringParameters || {};
 
-  // Accept either a POST body or query params.
   let body = {};
   if (event.body) {
     try { body = JSON.parse(event.body); }
@@ -170,7 +156,6 @@ exports.handler = async (event) => {
   const brand  = (body.brand  || p.brand  || "").trim();
   const market = (body.market || p.market || "South Africa").trim();
 
-  // Questions: [{cluster, q}] from the body, or pipe-separated in ?q=
   let picked = [];
   if (Array.isArray(body.questions) && body.questions.length) {
     picked = body.questions.slice(0, BATCH).map(item =>
@@ -187,28 +172,20 @@ exports.handler = async (event) => {
     return { statusCode: 400, headers: HDRS, body: JSON.stringify({
       error: "Provide a brand and at least one question.",
       maxPerCall: BATCH,
-      post: {
-        brand: "Dr Oetker", market: "South Africa",
-        domains: ["droetker.co.za"],
-        questions: [{ cluster: "01 launch", q: "what is a calzone" }]
-      },
-      get: "/api/answerz-share?brand=Dr%20Oetker&market=South%20Africa&q=what%20is%20a%20calzone|is%20it%20halal"
+      post: { brand: "BRAND", market: "MARKET", domains: ["brand.co.za"],
+              questions: [{ cluster: "01", q: "a buyer question" }] },
+      get: "/api/answerz-share?brand=X&market=Y&q=one|two|three"
     })};
   }
 
-  // Brand domains decide "brand-owned" vs creator vs retailer. Pass them —
-  // guessing from the brand name is a fallback, not a feature.
   const rawDomains = body.domains || p.domains || brand.toLowerCase().replace(/[^a-z0-9]/g, "");
   const brandDomains = (Array.isArray(rawDomains) ? rawDomains : String(rawDomains).split(","))
     .map(s => String(s).trim().toLowerCase()).filter(Boolean);
 
-  // Anything the client counts as "branded" — defaults to the brand name.
   const brandedTerms = (body.brandedTerms || [brand]).map(t => String(t).toLowerCase());
   const isBranded = q => brandedTerms.some(t => q.toLowerCase().includes(t));
 
-  const settled = await Promise.allSettled(
-    picked.map(x => serp(x.q, market, 18000))
-  );
+  const settled = await Promise.allSettled(picked.map(x => serp(x.q, market, 18000)));
 
   const rows = settled.map((s, i) => {
     const { cluster, q } = picked[i];
@@ -236,9 +213,9 @@ exports.handler = async (event) => {
       questionsWithOverview: withAio.length,
       brandNamed: aioNamed.length,
       brandCited: aioCited.length,
-      note: "Named = the answer mentions the brand. Cited = the brand's own page is used as a source. Cited is the stronger signal."
+      note: "Named = the answer mentions the brand. Cited = the brand's own page is a source. Cited is stronger."
     },
-    note: "Search surface plus Google AI Overviews (same call, no extra cost). ChatGPT and Perplexity are measured via /api/answerz-ai. Social and Video remain manual — DataForSEO does not read TikTok search.",
+    note: "Search surface plus Google AI Overviews. ChatGPT and Perplexity via /api/answerz-ai. Social and Video remain manual.",
     rows
   })};
 };
