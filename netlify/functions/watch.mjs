@@ -56,11 +56,35 @@ export default async (req, context) => {
   // self-host from ?src on first load (works for both /w and /v)
   await ensureStored(store, slug, url);
 
-  // ---- VIDEO bytes ----
+  // ---- VIDEO bytes (with HTTP Range support so browsers can stream/seek) ----
   if (path.startsWith("/v/")) {
     const data = await store.get(`v/${slug}`, { type: "arrayBuffer" });
     if (!data) return new Response("Not found", { status: 404 });
-    return new Response(data, { headers: { "content-type": "video/mp4", "cache-control": "public, max-age=31536000, immutable" } });
+    const total = data.byteLength;
+    const base = {
+      "content-type": "video/mp4",
+      "accept-ranges": "bytes",
+      "cache-control": "public, max-age=31536000, immutable",
+    };
+    const range = req.headers.get("range");
+    if (range) {
+      const m = /bytes=(\d*)-(\d*)/.exec(range);
+      if (m) {
+        let start = m[1] === "" ? 0 : parseInt(m[1], 10);
+        let end = m[2] === "" ? total - 1 : parseInt(m[2], 10);
+        if (isNaN(start)) start = 0;
+        if (isNaN(end) || end >= total) end = total - 1;
+        if (start > end || start >= total) {
+          return new Response("Range Not Satisfiable", { status: 416, headers: { ...base, "content-range": `bytes */${total}` } });
+        }
+        const chunk = data.slice(start, end + 1);
+        return new Response(chunk, {
+          status: 206,
+          headers: { ...base, "content-range": `bytes ${start}-${end}/${total}`, "content-length": String(chunk.byteLength) },
+        });
+      }
+    }
+    return new Response(data, { status: 200, headers: { ...base, "content-length": String(total) } });
   }
 
   // ---- WATCH page ----
