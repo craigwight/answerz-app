@@ -1,20 +1,20 @@
 // Answerz Gap — free self-serve visibility test
 //
 //   STAGE 1  GET /api/answerz-gap?mode=questions&brand=X&category=Y&market=Z
-//            → 8 real buyer questions from People Also Ask + related searches
+//                                 &problem=...&ownq=...
+//            → 8 buyer questions. Seeded on the problem when given — that
+//              reaches the high-intent questions, which is where brands are
+//              usually absent. Their own question, if supplied, goes first.
+//
 //   STAGE 2  GET /api/answerz-gap?mode=score&brand=X&domain=x.co.za&market=Z&q=...
 //            → one question scored: Google + AI Overview
-//
-// Staged deliberately: 11 SERP calls in one request would exceed Netlify's
-// ceiling, and the questions landing before the verdicts is the better moment.
 //
 // Env: DATAFORSEO_LOGIN, DATAFORSEO_PASSWORD
 
 const DFS = "https://api.dataforseo.com/v3";
 const WANT = 8;
 
-// Cache per warm instance. Eleven SERP calls a run adds up on a public page,
-// and the same brand+category will be tried repeatedly.
+// Cache per warm instance. Eleven SERP calls a run adds up on a public page.
 const MEM = new Map();
 const TTL = 24 * 60 * 60 * 1000;
 const MEM_MAX = 400;
@@ -156,6 +156,20 @@ function scoreOne(j, brand, brandDomains) {
   };
 }
 
+// Their own question goes first — testing a question they know their customers
+// ask is the most personal moment in the test. It is per-user, so it is spliced
+// in rather than cached with the shared harvest.
+function withOwn(list, ownRaw, want) {
+  const own = (ownRaw || "").trim();
+  let out = list.slice(0, own ? want - 1 : want);
+  if (own) {
+    const oq = own.replace(/\?+$/, "") + "?";
+    out = [{ q: oq, source: "Your customers ask this", yours: true }]
+          .concat(out.filter(x => x.q.toLowerCase() !== oq.toLowerCase()));
+  }
+  return out;
+}
+
 exports.handler = async (event) => {
   const p = event.queryStringParameters || {};
   const mode     = (p.mode || "questions").toLowerCase();
@@ -177,12 +191,20 @@ exports.handler = async (event) => {
       return { statusCode: 400, headers: HDRS, body: JSON.stringify({ error: "Add a category." }) };
     }
 
-    const ck = ckey("q", category, market);
+    const problem = (p.problem || "").trim().toLowerCase().replace(/^(it |we |our product )/, "");
+    const ck = ckey("q", category, market, problem);
     const hit = cGet(ck);
-    if (hit) return { statusCode: 200, headers: HDRS, body: JSON.stringify(
-      Object.assign({}, hit, { brand, cached: true })) };
+    if (hit) {
+      return { statusCode: 200, headers: HDRS, body: JSON.stringify(
+        Object.assign({}, hit, { brand, questions: withOwn(hit.questions, p.ownq, WANT), cached: true })) };
+    }
 
-    const seeds = [category, "best " + category, category + " vs"];
+    // Seeding on the problem reaches the high-intent questions. Seeding on the
+    // category alone returns generic ones a brand can be absent from harmlessly.
+    const seeds = problem
+      ? [category, "best " + category + " for " + problem, "how to " + problem, "why " + problem]
+      : [category, "best " + category, category + " vs"];
+
     const got = await Promise.allSettled(seeds.map(s => serp(s, market, 12000, 10)));
     const lists = got.filter(g => g.status === "fulfilled").map(g => items(g.value));
 
@@ -203,12 +225,14 @@ exports.handler = async (event) => {
 
     const payload = {
       brand, category, market,
-      questions: found.slice(0, WANT),
+      questions: found,
       totalFound: found.length,
+      seededOn: problem ? "the problem you named" : "the category",
       note: "Real questions, harvested live from Google People Also Ask and related searches."
     };
     cSet(ck, payload);
-    return { statusCode: 200, headers: HDRS, body: JSON.stringify(payload) };
+    return { statusCode: 200, headers: HDRS, body: JSON.stringify(
+      Object.assign({}, payload, { questions: withOwn(found, p.ownq, WANT) })) };
   }
 
   const q = (p.q || "").trim();
