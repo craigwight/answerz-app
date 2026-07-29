@@ -1,11 +1,11 @@
-// netlify/functions/watch.js
+// netlify/functions/watch.mjs
 // Permanent video hosting + branded "watch" page for Answerz creator demos.
-// - POST /api/watch  { source, slug, brand, question }
-//     Fetches the (temporary) Arcads video URL server-side, stores it in
-//     Netlify Blobs, and returns a clean permanent { watchUrl, videoUrl }.
-// - GET  /w/:slug   → branded player page (share THIS link in emails)
-// - GET  /v/:slug   → the raw mp4, streamed from Blobs
-// Netlify Blobs is built in on Netlify — no API key or package.json needed.
+// - POST /api/watch { source, slug, brand, question }  → host now, return {watchUrl,videoUrl}
+// - GET  /w/:slug[?src=&brand=&q=]  → branded player page. If ?src is present and the
+//        slug isn't stored yet, it fetches + stores the video on first load (self-host),
+//        so a headless caller only needs to build the link — the first open makes it permanent.
+// - GET  /v/:slug[?src=]  → the raw mp4 (also self-hosts from ?src on first load)
+// Netlify Blobs is built in — no key needed (declared in package.json).
 
 import { getStore } from "@netlify/blobs";
 
@@ -16,12 +16,28 @@ const esc = (s) => String(s || "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<
 const json = (o, status = 200) =>
   new Response(JSON.stringify(o), { status, headers: { "content-type": "application/json", "access-control-allow-origin": "*" } });
 
+async function ensureStored(store, slug, url) {
+  const existing = await store.get(`v/${slug}`, { type: "arrayBuffer" }).catch(() => null);
+  if (existing) return true;
+  const src = url.searchParams.get("src");
+  if (!src) return false;
+  try {
+    const r = await fetch(src);
+    if (!r.ok) return false;
+    const buf = await r.arrayBuffer();
+    await store.set(`v/${slug}`, buf, {
+      metadata: { brand: url.searchParams.get("brand") || "", question: url.searchParams.get("q") || "" },
+    });
+    return true;
+  } catch { return false; }
+}
+
 export default async (req, context) => {
   const url = new URL(req.url);
   const path = url.pathname;
   const store = getStore("answerz-videos");
 
-  // ---- SAVE: host a video permanently ----
+  // ---- SAVE via POST ----
   if (path === "/api/watch" && req.method === "POST") {
     let b;
     try { b = await req.json(); } catch { return json({ error: "bad json" }, 400); }
@@ -37,6 +53,9 @@ export default async (req, context) => {
   const slug = context.params && context.params.slug;
   if (!slug) return new Response("Not found", { status: 404 });
 
+  // self-host from ?src on first load (works for both /w and /v)
+  await ensureStored(store, slug, url);
+
   // ---- VIDEO bytes ----
   if (path.startsWith("/v/")) {
     const data = await store.get(`v/${slug}`, { type: "arrayBuffer" });
@@ -46,9 +65,11 @@ export default async (req, context) => {
 
   // ---- WATCH page ----
   const entry = await store.getWithMetadata(`v/${slug}`, { type: "arrayBuffer" });
-  if (!entry) return new Response("Video not found", { status: 404 });
-  const brand = esc((entry.metadata && entry.metadata.brand) || "Your brand");
-  const question = esc((entry.metadata && entry.metadata.question) || "");
+  const metaBrand = entry && entry.metadata && entry.metadata.brand;
+  const metaQ = entry && entry.metadata && entry.metadata.question;
+  const brand = esc(metaBrand || url.searchParams.get("brand") || "Your brand");
+  const question = esc(metaQ || url.searchParams.get("q") || "");
+  if (!entry && !url.searchParams.get("src")) return new Response("Video not found", { status: 404 });
 
   const html = `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${brand} — an&#9656;swerz</title>
 <link href="https://fonts.googleapis.com/css2?family=Asap+Condensed:wght@700&family=Inter+Tight:wght@300;400;600&family=IBM+Plex+Mono:wght@500&display=swap" rel="stylesheet">
@@ -63,7 +84,7 @@ video{width:100%;max-width:340px;border:1px solid #232630;border-radius:16px;bac
 .foot{font-family:'IBM Plex Mono',monospace;font-size:10px;color:#5A606C;margin-top:24px;letter-spacing:.12em;text-transform:uppercase}</style></head>
 <body><div class="wm">an<i></i>swerz</div><div class="tag">${brand} &middot; the answer</div>
 ${question ? `<div class="q">${question}</div>` : ""}
-<video controls autoplay muted playsinline src="/v/${esc(slug)}"></video>
+<video controls autoplay muted playsinline src="/v/${esc(slug)}${url.searchParams.get("src") ? "?src=" + encodeURIComponent(url.searchParams.get("src")) : ""}"></video>
 <a class="cta" href="https://www.tribeezsocial.com/answerz#start">Get your full Answerz Share &rarr;</a>
 <div class="disc"><b>AI DEMO</b> — this preview uses an AI-generated creator to show the format. Your live Answerz campaigns are made with real creators.</div>
 <div class="foot">an&#9656;swerz &mdash; a Tribeez product</div></body></html>`;
