@@ -6,7 +6,8 @@
 //              reaches the high-intent questions, which is where brands are
 //              usually absent. Their own question, if supplied, goes first.
 //
-//   STAGE 2  GET /api/answerz-gap?mode=score&brand=X&domain=x.co.za&market=Z&q=...
+//   STAGE 2  GET /api/answerz-gap?mode=score&brand=X&product=Y&domain=x.co.za
+//                                 &market=Z&q=...
 //            → one question scored: Google + AI Overview
 //
 // Env: DATAFORSEO_LOGIN, DATAFORSEO_PASSWORD
@@ -108,9 +109,13 @@ function harvest(all, category, brand) {
   return out.sort((a,b) => score(a) - score(b));
 }
 
-function scoreOne(j, brand, brandDomains) {
+function scoreOne(j, brand, brandDomains, product) {
   const its = items(j);
   const bl = brand.toLowerCase();
+  // A distinctly-named product ("Ristorante") may rank without the brand name in
+  // the title. Missing that reads as Absent when the brand is actually present,
+  // which is the worst error this tool can make.
+  const terms = [bl, (product || "").trim().toLowerCase()].filter(Boolean);
 
   const organic = its.filter(i => i.type === "organic").map((i, idx) => ({
     pos: i.rank_absolute || idx + 1,
@@ -120,7 +125,7 @@ function scoreOne(j, brand, brandDomains) {
 
   const hit = organic.find(o =>
     brandDomains.some(b => b && o.domain.toLowerCase().includes(b)) ||
-    o.title.toLowerCase().includes(bl)
+    terms.some(t => t && o.title.toLowerCase().includes(t))
   );
 
   const aio = its.find(i => i.type === "ai_overview");
@@ -142,7 +147,8 @@ function scoreOne(j, brand, brandDomains) {
     };
     grab(aio);
     const cited = refs.some(d => brandDomains.some(b => b && d.includes(b)));
-    ai = { present: true, status: cited ? "Cited" : text.includes(bl) ? "Named only" : "Absent" };
+    const named = terms.some(t => text.includes(t));
+    ai = { present: true, status: cited ? "Cited" : named ? "Named only" : "Absent" };
   }
 
   return {
@@ -174,6 +180,7 @@ exports.handler = async (event) => {
   const p = event.queryStringParameters || {};
   const mode     = (p.mode || "questions").toLowerCase();
   const brand    = (p.brand || "").trim();
+  const product  = (p.product || "").trim();
   const category = (p.category || "").trim();
   const market   = (p.market || "South Africa").trim();
 
@@ -238,14 +245,14 @@ exports.handler = async (event) => {
   const q = (p.q || "").trim();
   if (!q) return { statusCode: 400, headers: HDRS, body: JSON.stringify({ error: "Add a question." }) };
 
-  const sk = ckey("s", brand, brandDomains[0] || "", market, q);
+  const sk = ckey("s", brand, product, brandDomains[0] || "", market, q);
   const shit = cGet(sk);
   if (shit) return { statusCode: 200, headers: HDRS, body: JSON.stringify(
     Object.assign({}, shit, { cached: true })) };
 
   try {
     const j = await serp(q, market, 18000, 20);
-    const out = Object.assign({ brand, market, question: q }, scoreOne(j, brand, brandDomains));
+    const out = Object.assign({ brand, market, question: q }, scoreOne(j, brand, brandDomains, product));
     cSet(sk, out);
     return { statusCode: 200, headers: HDRS, body: JSON.stringify(out) };
   } catch (e) {
