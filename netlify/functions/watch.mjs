@@ -56,35 +56,41 @@ export default async (req, context) => {
   // self-host from ?src on first load (works for both /w and /v)
   await ensureStored(store, slug, url);
 
-  // ---- VIDEO bytes (with HTTP Range support so browsers can stream/seek) ----
+  // ---- VIDEO bytes (chunked HTTP Range so browsers can stream/seek) ----
+  // Netlify synchronous functions cap the response body at ~6 MB, so we NEVER
+  // return the whole file. Every response is a 206 partial capped at MAX_CHUNK.
+  // The browser (which always sends a Range for <video>) fetches the file in
+  // pieces — including the small tail chunk that holds the moov index — so
+  // playback starts even though this mp4's moov atom sits at the end.
   if (path.startsWith("/v/")) {
     const data = await store.get(`v/${slug}`, { type: "arrayBuffer" });
     if (!data) return new Response("Not found", { status: 404 });
     const total = data.byteLength;
+    const MAX_CHUNK = 4 * 1024 * 1024; // 4 MB, safely under Netlify's 6 MB limit
     const base = {
       "content-type": "video/mp4",
       "accept-ranges": "bytes",
       "cache-control": "public, max-age=31536000, immutable",
     };
-    const range = req.headers.get("range");
-    if (range) {
-      const m = /bytes=(\d*)-(\d*)/.exec(range);
-      if (m) {
-        let start = m[1] === "" ? 0 : parseInt(m[1], 10);
-        let end = m[2] === "" ? total - 1 : parseInt(m[2], 10);
-        if (isNaN(start)) start = 0;
-        if (isNaN(end) || end >= total) end = total - 1;
-        if (start > end || start >= total) {
-          return new Response("Range Not Satisfiable", { status: 416, headers: { ...base, "content-range": `bytes */${total}` } });
-        }
-        const chunk = data.slice(start, end + 1);
-        return new Response(chunk, {
-          status: 206,
-          headers: { ...base, "content-range": `bytes ${start}-${end}/${total}`, "content-length": String(chunk.byteLength) },
-        });
-      }
+    // Parse Range (default to an open-ended request from 0 when absent)
+    let start = 0, end = total - 1;
+    const m = /bytes=(\d*)-(\d*)/.exec(req.headers.get("range") || "");
+    if (m) {
+      start = m[1] === "" ? 0 : parseInt(m[1], 10);
+      end = m[2] === "" ? total - 1 : parseInt(m[2], 10);
+      if (isNaN(start)) start = 0;
+      if (isNaN(end) || end >= total) end = total - 1;
     }
-    return new Response(data, { status: 200, headers: { ...base, "content-length": String(total) } });
+    if (start > end || start >= total) {
+      return new Response("Range Not Satisfiable", { status: 416, headers: { ...base, "content-range": `bytes */${total}` } });
+    }
+    // Cap the served window so the body never exceeds the function limit
+    if (end - start + 1 > MAX_CHUNK) end = start + MAX_CHUNK - 1;
+    const chunk = data.slice(start, end + 1);
+    return new Response(chunk, {
+      status: 206,
+      headers: { ...base, "content-range": `bytes ${start}-${end}/${total}`, "content-length": String(chunk.byteLength) },
+    });
   }
 
   // ---- WATCH page ----
