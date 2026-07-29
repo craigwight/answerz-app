@@ -13,6 +13,15 @@
 const DFS = "https://api.dataforseo.com/v3";
 const WANT = 8;
 
+// Cache per warm instance. Eleven SERP calls a run adds up on a public page,
+// and the same brand+category will be tried repeatedly.
+const MEM = new Map();
+const TTL = 24 * 60 * 60 * 1000;
+const MEM_MAX = 400;
+const ckey = (...p) => p.join("::").toLowerCase().replace(/\s+/g, " ").trim();
+function cGet(k){ const m = MEM.get(k); if (m && m.exp > Date.now()) return m.d; if (m) MEM.delete(k); return null; }
+function cSet(k, d){ if (MEM.size >= MEM_MAX) MEM.delete(MEM.keys().next().value); MEM.set(k, { exp: Date.now()+TTL, d }); }
+
 const HDRS = {
   "content-type": "application/json",
   "access-control-allow-origin": "*",
@@ -167,6 +176,12 @@ exports.handler = async (event) => {
     if (!category) {
       return { statusCode: 400, headers: HDRS, body: JSON.stringify({ error: "Add a category." }) };
     }
+
+    const ck = ckey("q", category, market);
+    const hit = cGet(ck);
+    if (hit) return { statusCode: 200, headers: HDRS, body: JSON.stringify(
+      Object.assign({}, hit, { brand, cached: true })) };
+
     const seeds = [category, "best " + category, category + " vs"];
     const got = await Promise.allSettled(seeds.map(s => serp(s, market, 12000, 10)));
     const lists = got.filter(g => g.status === "fulfilled").map(g => items(g.value));
@@ -186,22 +201,29 @@ exports.handler = async (event) => {
       })};
     }
 
-    return { statusCode: 200, headers: HDRS, body: JSON.stringify({
+    const payload = {
       brand, category, market,
       questions: found.slice(0, WANT),
       totalFound: found.length,
       note: "Real questions, harvested live from Google People Also Ask and related searches."
-    })};
+    };
+    cSet(ck, payload);
+    return { statusCode: 200, headers: HDRS, body: JSON.stringify(payload) };
   }
 
   const q = (p.q || "").trim();
   if (!q) return { statusCode: 400, headers: HDRS, body: JSON.stringify({ error: "Add a question." }) };
 
+  const sk = ckey("s", brand, brandDomains[0] || "", market, q);
+  const shit = cGet(sk);
+  if (shit) return { statusCode: 200, headers: HDRS, body: JSON.stringify(
+    Object.assign({}, shit, { cached: true })) };
+
   try {
     const j = await serp(q, market, 18000, 20);
-    return { statusCode: 200, headers: HDRS, body: JSON.stringify(
-      Object.assign({ brand, market, question: q }, scoreOne(j, brand, brandDomains))
-    )};
+    const out = Object.assign({ brand, market, question: q }, scoreOne(j, brand, brandDomains));
+    cSet(sk, out);
+    return { statusCode: 200, headers: HDRS, body: JSON.stringify(out) };
   } catch (e) {
     return { statusCode: 200, headers: HDRS, body: JSON.stringify({
       brand, market, question: q, error: true, message: String(e.message || e)
