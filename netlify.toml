@@ -15,3 +15,7 @@
 [functions."sos"]
   # seconds; Netlify allows up to 26 on paid plans
   timeout = 26
+
+[functions."answerz-gap"]
+  # DataForSEO live SERP calls run 12-18s; the default cuts them off
+  timeout = 26
