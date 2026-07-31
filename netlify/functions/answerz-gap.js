@@ -15,13 +15,66 @@
 const DFS = "https://api.dataforseo.com/v3";
 const WANT = 8;
 
-// Cache per warm instance. Eleven SERP calls a run adds up on a public page.
+// ---------------------------------------------------------------------------
+// CACHE — two layers. Eleven SERP calls a run adds up on a public page, and
+// every miss is a paid DataForSEO credit.
+//
+//   L1  in-process Map. Free, instant, dies when the instance goes cold.
+//   L2  Netlify Blobs. Survives cold starts and deploys, so a brand demoed
+//       once stays free — that is the layer that makes repeat demos cost
+//       nothing.
+//
+// L2 is entirely best-effort. Every blob call is wrapped: if Blobs is
+// unavailable, misconfigured or slow, we fall through to a live SERP exactly
+// as before. The cache must never be able to break the engine.
+// ---------------------------------------------------------------------------
 const MEM = new Map();
-const TTL = 24 * 60 * 60 * 1000;
+const TTL = 30 * 24 * 60 * 60 * 1000;   // 30 days — SERPs move slowly enough
 const MEM_MAX = 400;
+const BLOB_MS = 1500;                    // never let the cache slow a request
 const ckey = (...p) => p.join("::").toLowerCase().replace(/\s+/g, " ").trim();
-function cGet(k){ const m = MEM.get(k); if (m && m.exp > Date.now()) return m.d; if (m) MEM.delete(k); return null; }
-function cSet(k, d){ if (MEM.size >= MEM_MAX) MEM.delete(MEM.keys().next().value); MEM.set(k, { exp: Date.now()+TTL, d }); }
+const bkey = k => Buffer.from(k).toString("base64url").slice(0, 300);
+
+let _store;
+async function store() {
+  if (_store !== undefined) return _store;
+  try {
+    const { getStore } = await import("@netlify/blobs");
+    _store = getStore("answerz-serp-cache");
+  } catch { _store = null; }
+  return _store;
+}
+
+const timeout = (p, ms) => Promise.race([
+  p, new Promise(res => setTimeout(() => res(null), ms))
+]);
+
+async function cGet(k) {
+  const m = MEM.get(k);
+  if (m && m.exp > Date.now()) return m.d;
+  if (m) MEM.delete(k);
+  try {
+    const s = await store();
+    if (!s) return null;
+    const raw = await timeout(s.get(bkey(k), { type: "json" }), BLOB_MS);
+    if (raw && raw.exp > Date.now() && raw.d) {
+      // promote back into L1 so the rest of this run is instant
+      MEM.set(k, { exp: raw.exp, d: raw.d });
+      return raw.d;
+    }
+  } catch {}
+  return null;
+}
+
+async function cSet(k, d) {
+  const exp = Date.now() + TTL;
+  if (MEM.size >= MEM_MAX) MEM.delete(MEM.keys().next().value);
+  MEM.set(k, { exp, d });
+  try {
+    const s = await store();
+    if (s) await timeout(s.setJSON(bkey(k), { exp, d }), BLOB_MS);
+  } catch {}
+}
 
 const HDRS = {
   "content-type": "application/json",
@@ -179,6 +232,9 @@ function withOwn(list, ownRaw, want) {
 exports.handler = async (event) => {
   const p = event.queryStringParameters || {};
   const mode     = (p.mode || "questions").toLowerCase();
+  // ?fresh=1 skips both cache layers — for when the number has to be live.
+  // Costs a SERP credit every time, so it is opt-in, never the default.
+  const fresh    = /^(1|true|yes)$/i.test(p.fresh || "");
   const brand    = (p.brand || "").trim();
   const product  = (p.product || "").trim();
   const category = (p.category || "").trim();
@@ -200,7 +256,7 @@ exports.handler = async (event) => {
 
     const problem = (p.problem || "").trim().toLowerCase().replace(/^(it |we |our product )/, "");
     const ck = ckey("q", category, market, problem);
-    const hit = cGet(ck);
+    const hit = fresh ? null : await cGet(ck);
     if (hit) {
       return { statusCode: 200, headers: HDRS, body: JSON.stringify(
         Object.assign({}, hit, { brand, questions: withOwn(hit.questions, p.ownq, WANT), cached: true })) };
@@ -237,7 +293,7 @@ exports.handler = async (event) => {
       seededOn: problem ? "the problem you named" : "the category",
       note: "Real questions, harvested live from Google People Also Ask and related searches."
     };
-    cSet(ck, payload);
+    await cSet(ck, payload);
     return { statusCode: 200, headers: HDRS, body: JSON.stringify(
       Object.assign({}, payload, { questions: withOwn(found, p.ownq, WANT) })) };
   }
@@ -246,14 +302,14 @@ exports.handler = async (event) => {
   if (!q) return { statusCode: 400, headers: HDRS, body: JSON.stringify({ error: "Add a question." }) };
 
   const sk = ckey("s", brand, product, brandDomains[0] || "", market, q);
-  const shit = cGet(sk);
+  const shit = fresh ? null : await cGet(sk);
   if (shit) return { statusCode: 200, headers: HDRS, body: JSON.stringify(
     Object.assign({}, shit, { cached: true })) };
 
   try {
     const j = await serp(q, market, 18000, 20);
     const out = Object.assign({ brand, market, question: q }, scoreOne(j, brand, brandDomains, product));
-    cSet(sk, out);
+    await cSet(sk, out);
     return { statusCode: 200, headers: HDRS, body: JSON.stringify(out) };
   } catch (e) {
     return { statusCode: 200, headers: HDRS, body: JSON.stringify({
