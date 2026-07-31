@@ -35,13 +35,13 @@ const BLOB_MS = 1500;                    // never let the cache slow a request
 const ckey = (...p) => p.join("::").toLowerCase().replace(/\s+/g, " ").trim();
 const bkey = k => Buffer.from(k).toString("base64url").slice(0, 300);
 
-let _store;
+let _store, _storeErr = null;
 async function store() {
   if (_store !== undefined) return _store;
   try {
     const { getStore } = await import("@netlify/blobs");
     _store = getStore("answerz-serp-cache");
-  } catch { _store = null; }
+  } catch (e) { _storeErr = String(e && e.message || e); _store = null; }
   return _store;
 }
 
@@ -244,6 +244,21 @@ exports.handler = async (event) => {
   const brandDomains = domainRaw
     ? [domainRaw.replace(/^https?:\/\//,"").replace(/^www\./,"").split("/")[0].toLowerCase()]
     : [brand.toLowerCase().replace(/[^a-z0-9]/g,"")];
+
+  // ?debug=cache — is the durable layer actually alive? Read-only, no SERP spend.
+  if ((p.debug || "") === "cache") {
+    const s = await store();
+    let write = null, read = null;
+    if (s) {
+      try { await s.setJSON("__probe", { exp: Date.now() + 60000, d: "ok" }); write = "ok"; }
+      catch (e) { write = String(e && e.message || e); }
+      try { const r = await s.get("__probe", { type: "json" }); read = r && r.d; }
+      catch (e) { read = String(e && e.message || e); }
+    }
+    return { statusCode: 200, headers: HDRS, body: JSON.stringify({
+      hasStore: !!s, storeError: _storeErr, write, read, memSize: MEM.size
+    })};
+  }
 
   if (!brand) {
     return { statusCode: 400, headers: HDRS, body: JSON.stringify({ error: "Add a brand." }) };
