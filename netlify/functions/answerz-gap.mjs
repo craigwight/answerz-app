@@ -229,6 +229,11 @@ function withOwn(list, ownRaw, want) {
   return out;
 }
 
+// Route directly rather than via the /api/* redirect. Going through the
+// redirect invokes this in v1 compatibility mode, where Netlify does NOT
+// inject the Blobs context — which is what kept the durable cache dark.
+export const config = { path: "/api/answerz-gap" };
+
 export default async (req) => {
   const p = Object.fromEntries(new URL(req.url).searchParams);
   const mode     = (p.mode || "questions").toLowerCase();
