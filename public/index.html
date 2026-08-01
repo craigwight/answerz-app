@@ -613,6 +613,7 @@
  
   function finishRun(data){
     resetLoader();
+    if(data && data.insufficientData){ renderResult(data); return; } // data-quality results also carry an error title - must run before the error fallback below
     if(!data || data.error){ showError((data&&data.error)?data.error:'Something went wrong.'); return; }
     renderResult(data);
   }
