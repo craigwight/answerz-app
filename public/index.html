@@ -411,7 +411,8 @@
       </div>
       <div class="cfhint">Tip: use brand names only — “Carlton Oasis”, not “Carlton Oasis in Spijkenisse”. Location words have almost no search volume. 3–4 rivals gives the sharpest read — the aspirational leader plus your direct competitors. Change the market above and we'll re-suggest.</div>
  
-      <button class="runbtn" onclick="runFromConfirm()">Run my Share of Search →</button>
+      <label class="cfhint" style="cursor:pointer;display:block"><input type="checkbox" id="cPL"> <b>Comparing a product line?</b> Tick to add your category to every term — Philips becomes Philips air fryer. Write the category the way buyers type it (singular: air fryer, not air fryers) and keep it identical for every rival. Spelling counts too: airfryer and air fryer are different searches — run it both ways to see which your market uses.</label>
+    <button class="runbtn" onclick="runFromConfirm()">Run my Share of Search →</button>
       <div class="cfback" onclick="goHome()">← use a different brand</div>
     </div>
   </div>
@@ -443,6 +444,7 @@
       <div class="bignum"><span id="num">0</span><span class="pct">%</span></div>
       <div class="heroclaim" id="rClaim"></div>
       <div class="directional"><span class="d"></span><span id="rDirectional">Search demand · last 12 months · relative/directional</span></div>
+      <div class="directional">Free trends check — directional only. The real Share of Search is built on the Answerz proprietary tech stack — revealed on your call.</div>
     </div>
  
     <div class="card rsection">
@@ -575,6 +577,7 @@
       return (el.childNodes[0].textContent||'').trim();
     }).filter(Boolean);
     document.getElementById('confirm').style.display='none';
+    var pl=document.getElementById('cPL'); if(pl&&pl.checked&&category){ brand=brand+' '+category; comps=comps.map(function(c){ return c+' '+category; }); }
     startRun({brand:brand, category:category, market:market, competitors:comps});
   }
  
