@@ -685,7 +685,7 @@
       return '<div class="bar-row'+(x.you?' you':'')+'">'
         +'<div class="bar-name">'+esc(x.name)+'</div>'
         +'<div class="bar-track"><div class="bar-fill '+cls+'" data-w="'+w+'"></div></div>'
-        +'<div class="bar-val">'+x.share+'%'+youtag+'</div></div>';
+        +'<div class="bar-val">'+(x.share==null?'no data':x.share+'%')+youtag+'</div></div>';
     }).join('');
  
     // gap callout
