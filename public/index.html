@@ -741,7 +741,7 @@
     lead.email=email;
  
     var body=new URLSearchParams();
-    body.append('form-name','answerz-reveal-call');
+    body.append('_subject','New Answerz lead'+(lead.brand?' — '+lead.brand:''));
     body.append('name',name);
     body.append('email',email);
     body.append('brand',lead.brand);
@@ -752,12 +752,13 @@
     body.append('share',(lastResult.share!==''?lastResult.share+'%':''));
     body.append('leader',lastResult.leader||'');
     body.append('gap',(lastResult.gap!==''&&lastResult.gap!=null?lastResult.gap+'x':''));
-    body.append('bot-field','');
+    body.append('_gotcha','');
  
     var btn=document.querySelector('#formView .msubmit');
     if(btn){ btn.disabled=true; btn.textContent='Sending…'; }
-    fetch('/',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body.toString()})
-      .then(function(){
+    fetch('https://formspree.io/f/mljreroy',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded','Accept':'application/json'},body:body.toString()})
+      .then(function(r){
+        if(!r.ok){ throw new Error('Formspree '+r.status); }
         document.getElementById('formView').style.display='none';
         document.getElementById('successView').style.display='block';
       })
