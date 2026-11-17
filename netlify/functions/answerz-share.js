@@ -60,7 +60,26 @@ async function serp(keyword, market, ms) {
   } finally { clearTimeout(t); }
 }
 
-function readOne(json, brand, brandDomains) {
+// Google now serves some result links as google.com/goto?url=<opaque token>.
+// DataForSEO passes that through, so `domain` reads "google.com" for every
+// result and the real site is lost. The visible breadcrumb still carries the
+// real host, so recover it from there. If nothing can be recovered the domain
+// is left empty (never "google.com"), and the row is flagged unresolved.
+const isGoogleHost = d => /(^|\.)google\.[a-z.]+$/i.test((d || "").trim());
+const hostFrom = s => {
+  const m = String(s || "").match(/(?:https?:\/\/)?((?:[a-z0-9-]+\.)+[a-z]{2,})/i);
+  return m ? m[1].toLowerCase().replace(/^www\./, "") : "";
+};
+function realDomain(i) {
+  if (i.domain && !isGoogleHost(i.domain)) return i.domain;
+  for (const c of [i.breadcrumb, i.main_domain, i.website_name, i.cache_url]) {
+    const h = hostFrom(c);
+    if (h && !isGoogleHost(h)) return h;
+  }
+  return "";
+}
+
+function readOne(json, brand, brandDomains, debug) {
   const task = (json.tasks || [])[0];
   if (!task) throw new Error("empty response");
   if (task.status_code && task.status_code !== 20000) throw new Error(task.status_message || "task failed");
@@ -69,10 +88,12 @@ function readOne(json, brand, brandDomains) {
 
   const organic = items.filter(i => i.type === "organic").map((i, idx) => ({
     pos: i.rank_absolute || idx + 1,
-    domain: i.domain || "",
+    domain: realDomain(i),
     title: (i.title || "").slice(0, 110),
-    url: i.url || ""
+    url: i.url || "",
+    wrapped: isGoogleHost(i.domain)
   }));
+  const unresolved = organic.filter(o => !o.domain).length;
 
   const bl = brand.toLowerCase();
   const hit = organic.find(o =>
@@ -136,6 +157,15 @@ function readOne(json, brand, brandDomains) {
       pos: o.pos, domain: o.domain, who: classify(o.domain, brandDomains), title: o.title
     })),
     resultsSeen: organic.length,
+    // results whose real site could not be recovered; if this equals
+    // resultsSeen the Search read for this question is not valid
+    unresolvedDomains: unresolved,
+    wrappedLinks: organic.filter(o => o.wrapped).length,
+    ...(debug ? { debugFirstOrganic: (() => {
+      const f = items.find(i => i.type === "organic") || {};
+      return { keys: Object.keys(f), domain: f.domain, breadcrumb: f.breadcrumb,
+               website_name: f.website_name, main_domain: f.main_domain };
+    })() } : {}),
     aiOverview,
     peopleAlsoAsk: paa.map(q => q.title).filter(Boolean).slice(0, 5),
     relatedSearches: rel.slice(0, 5)
@@ -185,6 +215,8 @@ exports.handler = async (event) => {
   const brandedTerms = (body.brandedTerms || [brand]).map(t => String(t).toLowerCase());
   const isBranded = q => brandedTerms.some(t => q.toLowerCase().includes(t));
 
+  const debug = p.debug === "1" || body.debug === true;
+
   const settled = await Promise.allSettled(picked.map(x => serp(x.q, market, 18000)));
 
   const rows = settled.map((s, i) => {
@@ -193,11 +225,13 @@ exports.handler = async (event) => {
     if (s.status !== "fulfilled") {
       return Object.assign(base, { error: String(s.reason && s.reason.message || s.reason) });
     }
-    try { return Object.assign(base, readOne(s.value, brand, brandDomains)); }
+    try { return Object.assign(base, readOne(s.value, brand, brandDomains, debug)); }
     catch (e) { return Object.assign(base, { error: e.message }); }
   });
 
   const ok = rows.filter(r => !r.error);
+  // a row where no result's real site could be read is not a Search measurement
+  const blind = ok.filter(r => r.resultsSeen > 0 && r.unresolvedDomains === r.resultsSeen);
   const appears = ok.filter(r => r.appears);
   const withAio = ok.filter(r => r.aiOverview && r.aiOverview.present);
   const aioNamed = withAio.filter(r => r.aiOverview.brandNamed);
@@ -207,6 +241,10 @@ exports.handler = async (event) => {
     brand, market, surface: "Search",
     measured: ok.length,
     failed: rows.length - ok.length,
+    searchUnreadable: blind.length,
+    ...(blind.length ? { warning: blind.length + " of " + ok.length +
+      " questions returned results whose real sites could not be read (Google redirect links). " +
+      "Do not score those as absences." } : {}),
     appearsCount: appears.length,
     coverageThisCall: ok.length ? Math.round((appears.length / ok.length) * 100) : null,
     aiOverview: {
